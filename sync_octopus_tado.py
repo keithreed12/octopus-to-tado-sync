@@ -1,36 +1,64 @@
 import argparse
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from requests.auth import HTTPBasicAuth
 from playwright.async_api import async_playwright
 from PyTado.interface import Tado
+import json
+from URLDecoder.decoder import URLDecoder
 
+TOKEN_FILE_PATH="/tmp/tado_refresh_token"
 
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
-    """
-    Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
-    """
-    period_from = datetime(2000, 1, 1, 0, 0, 0)
-    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
+header = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer xx'}
+
+def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_token):
+    header['Authorization'] = f'Bearer {tado_token}'
+    
+    resp=requests.get('https://energy-insights.tado.com/api/homes/1898784/heatingBills', headers=header)
+    latest = resp.json()['heatingBills'][0]['endDate']
+    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    print(f"Latest reading: {latest}, yesterday's date: {yesterday}")
     total_consumption = 0.0
 
-    while url:
-        response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
+    if latest >= yesterday:
+        print(f"Already sent reading for today {yesterday}")
+    else:
+        period_from = datetime.fromisoformat(latest)
+        url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=day&period_from={period_from.isoformat()}Z"
 
-        if response.status_code == 200:
-            meter_readings = response.json()
-            total_consumption += sum(
-                interval["consumption"] for interval in meter_readings["results"]
-            )
-            url = meter_readings.get("next", "")
-        else:
-            print(
-                f"Failed to retrieve data. Status code: {response.status_code}, Message: {response.text}"
-            )
-            break
+        while url:
+            response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
 
-    print(f"Total consumption is {total_consumption}")
+            if response.status_code == 200:
+                meter_readings = response.json()
+                print(meter_readings)
+                total_consumption += sum(
+                    interval["consumption"] for interval in meter_readings["results"]
+                )
+                for interval in meter_readings["results"]:
+                    bill = {
+                        'startDate': interval["interval_start"][0:10],
+                        'endDate': interval["interval_end"][0:10],
+                        'consumption': interval["consumption"],
+                        'unitPriceInCents': 674
+                    }
+                    if (bill['startDate'] != bill['endDate']):
+                        resp=requests.post('https://energy-insights.tado.com/api/homes/1898784/heatingBills',
+                                        data=json.dumps(bill), headers=header)
+#                    print(bill)
+#                    print (resp.text)
+                    
+                url = meter_readings.get("next", "")
+            else:
+                print(
+                    f"Failed to retrieve data. Status code: {response.status_code}, Message: {response.text}"
+                )
+                break
+
+        print(f"Total consumption is {total_consumption}")
     return total_consumption
 
 
@@ -71,9 +99,10 @@ async def browser_login(url, username, password):
 
 
 def tado_login(username, password):
-    tado = Tado(token_file_path="/tmp/tado_refresh_token")
+    tado = Tado(token_file_path=TOKEN_FILE_PATH)
 
     status = tado.device_activation_status()
+    print (status)
 
     if status == "PENDING":
         url = tado.device_verification_url()
@@ -112,19 +141,19 @@ def parse_args():
     )
 
     # Tado API arguments
-    parser.add_argument("--tado-email", required=True, help="Tado account email")
-    parser.add_argument("--tado-password", required=True, help="Tado account password")
+    parser.add_argument("--tado-email", required=False, help="Tado account email")
+    parser.add_argument("--tado-password", required=False, help="Tado account password")
 
     # Octopus API arguments
     parser.add_argument(
         "--mprn",
-        required=True,
-        help="MPRN (Meter Point Reference Number) for the gas meter",
+        required=False,
+        help="MPRN (Meter Point Reference Number) for the gas meter"
     )
     parser.add_argument(
-        "--gas-serial-number", required=True, help="Gas meter serial number"
+        "--gas-serial-number", required=False, help="Gas meter serial number"
     )
-    parser.add_argument("--octopus-api-key", required=True, help="Octopus API key")
+    parser.add_argument("--octopus-api-key", required=False, help="Octopus API key")
 
     return parser.parse_args()
 
@@ -132,10 +161,35 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
+    tado = tado_login(username=args.tado_email, password=args.tado_password)
+    
+    token = tado.get_refresh_token()
+    print (f"Token: {token}")
+#    
+    url = "https://login.tado.com/oauth2/token"
+    data = {
+        "client_id": "1bb50063-6b0c-4d11-bd99-387f4a91cc46",
+        "grant_type": "refresh_token",
+        "refresh_token": token
+    }
+
+    # pylint: disable=R0204
+    
+    resp = requests.post(url, params=data, data=json.dumps({}).encode("utf8"),
+                         headers={'Content-Type': 'application/json',
+                                            'Referer' : 'https://my.tado.com/'})
+
+    with open(TOKEN_FILE_PATH, "w", encoding="utf-8") as f:
+        json.dump(
+            {"refresh_token": resp.json()['refresh_token']},
+            f,
+        )
+
+
     # Get total consumption from Octopus Energy API
     consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number
+        args.octopus_api_key, args.mprn, args.gas_serial_number, resp.json()['access_token']
     )
 
     # Send the total consumption to Tado
-    send_reading_to_tado(args.tado_email, args.tado_password, consumption)
+#    send_reading_to_tado(TADO_USERNAME, TADO_PASSWORD, consumption)
