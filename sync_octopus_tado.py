@@ -6,7 +6,7 @@ from requests.auth import HTTPBasicAuth
 from playwright.async_api import async_playwright
 from PyTado.interface import Tado
 import json
-from URLDecoder.decoder import URLDecoder
+
 
 TOKEN_FILE_PATH="/tmp/tado_refresh_token"
 
