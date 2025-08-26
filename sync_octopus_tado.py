@@ -17,39 +17,46 @@ header = {
 def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_token):
     header['Authorization'] = f'Bearer {tado_token}'
     
-    resp=requests.get('https://energy-insights.tado.com/api/homes/1898784/heatingBills', headers=header)
-    latest = resp.json()['heatingBills'][0]['endDate']
-    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
-    print(f"Latest reading: {latest}, yesterday's date: {yesterday}")
-    total_consumption = 0.0
-
-    if latest >= yesterday:
-        print(f"Already sent reading for today {yesterday}")
+    resp=requests.get('https://energy-insights.tado.com/api/homes/1898784/meterReadings', headers=header)
+    readings = resp.json()
+    latest_meter_reading = 0
+    print (json.dumps(readings))
+    if 'readings' in readings and len(readings['readings']) > 0:
+        latest_date = readings['readings'][0]['date']
+        latest_meter_reading = readings['readings'][0]['reading']
     else:
-        period_from = datetime.fromisoformat(latest)
-        url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=day&period_from={period_from.isoformat()}Z"
+        latest_date = '2024-12-31'
+        latest_meter_reading = 1900
+    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    print(f"Latest reading: {latest_date}, yesterday's date: {yesterday}")
+    total_consumption = 0
+
+    if latest_date >= yesterday:
+        print(f"Already sent reading for yesterday {yesterday}")
+    else:
+        period_from = datetime.fromisoformat(latest_date)
+        url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=day&period_from={period_from.isoformat()}Z&order_by=period"
 
         while url:
             response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
 
             if response.status_code == 200:
                 meter_readings = response.json()
-                print(meter_readings)
+                print(json.dumps(meter_readings))
                 total_consumption += sum(
                     interval["consumption"] for interval in meter_readings["results"]
                 )
                 for interval in meter_readings["results"]:
-                    bill = {
-                        'startDate': interval["interval_start"][0:10],
-                        'endDate': interval["interval_end"][0:10],
-                        'consumption': interval["consumption"],
-                        'unitPriceInCents': 674
+                    latest_meter_reading += interval["consumption"]
+                    reading = {
+                        'date': interval["interval_end"][0:10],
+                        'reading': round(latest_meter_reading)
                     }
-                    if (bill['startDate'] != bill['endDate']):
-                        resp=requests.post('https://energy-insights.tado.com/api/homes/1898784/heatingBills',
-                                        data=json.dumps(bill), headers=header)
-#                    print(bill)
-#                    print (resp.text)
+                    if (interval['interval_start'][0:10] != interval['interval_end'][0:10]):
+                        resp=requests.post('https://energy-insights.tado.com/api/homes/1898784/meterReadings',
+                                        data=json.dumps(reading), headers=header)
+                    print(reading)
+                    print (resp.text)
                     
                 url = meter_readings.get("next", "")
             else:
@@ -60,6 +67,17 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_t
 
         print(f"Total consumption is {total_consumption}")
     return total_consumption
+
+def delete_all_tado_meter_readings(api_key, mprn, gas_serial_number, tado_token):
+    header['Authorization'] = f'Bearer {tado_token}'
+    
+    resp=requests.get('https://energy-insights.tado.com/api/homes/1898784/meterReadings', headers=header)
+    readings = resp.json()
+    print (json.dumps(readings))
+    for reading in readings['readings']:
+        print (f"Deleting {reading}")
+        resp=requests.delete(f"https://energy-insights.tado.com/api/homes/1898784/meterReadings/{reading['id']}", headers=header)
+        print (resp.text)
 
 
 async def browser_login(url, username, password):
@@ -185,6 +203,11 @@ if __name__ == "__main__":
             f,
         )
 
+    print (resp.json())
+
+    resp.json()['access_token']
+
+#    delete_all_tado_meter_readings(args.octopus_api_key, args.mprn, args.gas_serial_number, resp.json()['access_token'])
 
     # Get total consumption from Octopus Energy API
     consumption = get_meter_reading_total_consumption(
